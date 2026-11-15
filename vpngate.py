@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VPN Gate SSTP 节点检测流水线（模板仓库）。
+"""VPN Gate SSTP 单文件优化版。
 
 流程:
   1. 抓取 VPN Gate 原始节点（官方 API，失败回退 GitHub 镜像）
@@ -11,6 +11,10 @@
 
 配置全部来自环境变量。模板仓库约定：用户只需在仓库里配置 Secret `DOMAIN`，
 工作流会拼出检测地址；本地运行时可以直接设置 CHECK_WORKER。
+
+只替换仓库根目录 vpngate.py 即可运行检测工作流。
+网页中的旧“住宅”标签在生成产物时自动改为“运营商候选”。
+本文件改变了分类和发布规则；原仓库旧测试中的相关断言需要另行同步。
 """
 
 from __future__ import annotations
@@ -946,6 +950,8 @@ def write_outputs(
     if os.path.exists(cfg.template_html):
         with open(cfg.template_html, "r", encoding="utf-8") as handle:
             html = handle.read()
+        # 保留仓库中的原网页模板；仅调整生成页面的可见中文标签。
+        html = html.replace('住宅', '运营商候选')
     else:
         html = (
             "<!doctype html><html><head><meta charset='utf-8'><title>VPN Gate SSTP</title></head>"
