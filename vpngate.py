@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""VPN Gate SSTP 单文件优化版。
+"""VPN Gate SSTP 节点检测流水线（模板仓库）。
 
 流程:
   1. 抓取 VPN Gate 原始节点（官方 API，失败回退 GitHub 镜像）
-  2. 提取 TCP 候选，交由 Worker 确认 SSTP 连通性
+  2. 只保留带 TCP 入口的 SSTP 节点（VPN Gate 的 TCP 端口即 SSTP 端口）
   3. 去重 → 按 Ping 预排序 →（可选）截断
   4. 并发调用检测 Worker
   5. 合并静态优选域名与优选 API 端点
@@ -11,10 +11,6 @@
 
 配置全部来自环境变量。模板仓库约定：用户只需在仓库里配置 Secret `DOMAIN`，
 工作流会拼出检测地址；本地运行时可以直接设置 CHECK_WORKER。
-
-只替换仓库根目录 vpngate.py 即可运行检测工作流。
-网页中的旧“住宅”标签在生成产物时自动改为“运营商候选”。
-本文件改变了分类和发布规则；原仓库旧测试中的相关断言需要另行同步。
 """
 
 from __future__ import annotations
@@ -62,7 +58,20 @@ PLACEHOLDER_MARKERS = ("你的", "YOUR_", "YOUR-", "example.com", "yourdomain")
 
 # 静态优选域名池（可用 EDGE_HOSTS 整体覆盖）
 DEFAULT_EDGE_HOSTS = [
+    "saas.sin.fan:443",
+    "www.mfyx.cn:443",
+    "cf.nyanya.moe:443",
+    "cf.877774.xyz:443",
     "cdn.204910.best:443",
+    "cdn.ctn32.us.kg:443",
+    "p.etime.vip:443",
+    "cmcc.vvvv.ee:443",
+    "cfsaas.080112.xyz:443",
+    "cdn.aneko.ink:443",
+    "hk.cf.3666888.xyz:443",
+    "best.hzample.kdns.fr:443",
+    "ctsg.cfyx.aliyun.20237737.xyz:443",
+    "china-unicom.cname.cloudflare.468123.xyz:443",
 ]
 
 DATA_CENTER_ORG_KEYWORDS = [
@@ -280,8 +289,6 @@ class Config:
     min_success_ratio: float
     max_residential_per_country: int
     max_datacenter_per_country: int
-    check_rounds: int = 2
-    residential_only: bool = True
 
     @classmethod
     def load(cls) -> "Config":
@@ -314,10 +321,8 @@ class Config:
             optimal_api=os.environ.get("OPTIMAL_API", DEFAULT_OPTIMAL_API),
             nodes_url=derive_nodes_url(),
             min_success_ratio=_env_float("MIN_SUCCESS_RATIO", 0.0, minimum=0.0),
-            max_residential_per_country=_env_int("MAX_RESIDENTIAL_PER_COUNTRY", 3),
+            max_residential_per_country=_env_int("MAX_RESIDENTIAL_PER_COUNTRY", 20),
             max_datacenter_per_country=_env_int("MAX_DATACENTER_PER_COUNTRY", 10),
-            check_rounds=_env_int('CHECK_ROUNDS', 2, minimum=1),
-            residential_only=os.environ.get('RESIDENTIAL_ONLY', '1').strip().lower() not in {'0', 'false', 'no'},
         )
 
 
@@ -581,32 +586,15 @@ def prioritize(nodes: list[Node]) -> list[Node]:
 def classify_network(org: str | None, is_datacenter: bool | None) -> str:
     if is_datacenter is True:
         return "datacenter"
-    # 非机房不等于家庭宽带，正向候选由 strict_residential_evidence 核验。
+    if is_datacenter is False:
+        return "residential"
     upper = (org or "").upper()
     if upper:
         if any(keyword in upper for keyword in DATA_CENTER_ORG_KEYWORDS):
             return "datacenter"
         if any(keyword in upper for keyword in RESIDENTIAL_ORG_KEYWORDS):
-            return "unknown"
+            return "residential"
     return "unknown"
-
-
-def strict_residential_evidence(exit_info: dict[str, Any]) -> tuple[bool, str]:
-    """运营商网络 + 显式完整风险字段；不声称家庭套餐、独享或纯净。"""
-    privacy = exit_info.get('privacy')
-    if not isinstance(privacy, dict):
-        return False, '风险字段缺失'
-    required = ('is_hosting', 'is_proxy', 'is_vpn', 'is_tor', 'is_abuser')
-    if any(privacy.get(k) is True for k in required + ('is_anonymous', 'is_bogon', 'is_icloud_relay')):
-        return False, '数据库存在机房或风险标记'
-    if any(privacy.get(k) is not False for k in required):
-        return False, '风险信息不完整'
-    asn = exit_info.get('asn')
-    company = exit_info.get('company')
-    types = {str(v.get('type') or '').lower() for v in (asn, company) if isinstance(v, dict)}
-    if 'hosting' in types or 'education' in types or 'isp' not in types:
-        return False, '未确认属于运营商网络'
-    return True, '运营商网络候选；不保证家庭套餐、独享或纯净'
 
 
 # ---------------------------------------------------------------------------
@@ -643,9 +631,7 @@ def check_one(
             return result
 
         payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError('Worker 返回内容必须是 JSON 对象')
-        success = payload.get("success") is True
+        success = bool(payload.get("success"))
         result["success"] = success
         result["status"] = "success" if success else "failed"
         result["latency_ms"] = payload.get("responseTime")
@@ -657,19 +643,7 @@ def check_one(
         exit_info = payload.get("exit") or {}
         if success and exit_info:
             asn = exit_info.get("asn") or {}
-            if not isinstance(asn, dict):
-                asn = {}
             org = str(asn.get("org") or asn.get("name") or "")
-            privacy = exit_info.get('privacy')
-            privacy = privacy if isinstance(privacy, dict) else {}
-            is_datacenter = privacy.get('is_hosting')
-            if not isinstance(is_datacenter, bool):
-                is_datacenter = None
-            candidate, evidence = strict_residential_evidence(exit_info)
-            result['residential_candidate'] = candidate
-            result['residential_evidence'] = evidence
-            result['purity'] = 'unverified'
-            result['known_public_vpn'] = True
             result["exit"] = {
                 "ip": exit_info.get("ip"),
                 "country": exit_info.get("country"),
@@ -678,50 +652,16 @@ def check_one(
                 "continent": exit_info.get("continent"),
                 "asn": asn.get("asn"),
                 "org": org,
-                "is_datacenter": is_datacenter,
-                "asn_type": asn.get('type'),
-                "company": exit_info.get('company'),
-                "privacy": privacy,
+                "is_datacenter": exit_info.get("is_datacenter"),
             }
-            result["residential"] = 'residential' if candidate else classify_network(org, is_datacenter)
+            result["residential"] = classify_network(org, exit_info.get("is_datacenter"))
         elif success:
             result["residential"] = "unknown"
         return result
     except Exception as exc:  # noqa: BLE001 - 单节点失败不影响整体
-        result['success'] = False
-        result['status'] = 'failed'
         result["error"] = f"{type(exc).__name__}: {exc}"
         result["worker_error"] = True
         return result
-
-
-def check_repeated(node: Node, session: requests.Session, cfg: Config) -> dict[str, Any]:
-    import statistics
-    samples = []
-    for _ in range(cfg.check_rounds):
-        result = check_one(node, session, cfg.worker_base, cfg.check_timeout)
-        samples.append(result)
-        if not result['success']:
-            break
-    result = dict(samples[-1])
-    result['check_rounds_required'] = cfg.check_rounds
-    result['check_rounds_passed'] = sum(s['success'] for s in samples)
-    result['check_samples'] = [{'success': s['success'], 'latency_ms': s.get('latency_ms'),
-                              'error': s.get('error')} for s in samples]
-    result['success'] = len(samples) == cfg.check_rounds and all(s['success'] for s in samples)
-    result['status'] = 'success' if result['success'] else 'failed'
-    result['residential_candidate'] = result['success'] and all(s.get('residential_candidate') is True for s in samples)
-    if result.get('residential') == 'residential' and not result['residential_candidate']:
-        result['residential'] = 'unknown'
-    exits = {s.get('exit', {}).get('ip') for s in samples if isinstance(s.get('exit'), dict)}
-    if result['residential_candidate'] and (None in exits or len(exits) != 1):
-        result['residential_candidate'] = False
-        result['residential'] = 'unknown'
-        result['residential_evidence'] = '多轮检测出口 IP 不一致或缺失'
-    latencies = [s['latency_ms'] for s in samples if isinstance(s.get('latency_ms'), (int, float))
-                 and not isinstance(s['latency_ms'], bool) and s['latency_ms'] >= 0]
-    result['latency_ms'] = statistics.median(latencies) if latencies else None
-    return result
 
 
 def check_all(
@@ -734,7 +674,7 @@ def check_all(
     deadline = time.monotonic() + cfg.deadline_s
     with ThreadPoolExecutor(max_workers=cfg.concurrency) as pool:
         futures = {
-            pool.submit(check_repeated, node, session, cfg): node
+            pool.submit(check_one, node, session, cfg.worker_base, cfg.check_timeout): node
             for node in nodes
         }
         pending = set(futures)
@@ -744,10 +684,6 @@ def check_all(
                 results.append(future.result())
         except TimeoutError:
             log("CLOUDFLARE WORKER", f"整体检测超时（{cfg.deadline_s:.0f}s），未完成的节点按失败处理")
-            # 先取消尚未启动的任务，避免退出线程池时继续执行整个队列。
-            # 已在运行的请求仍需等待结束；这是软截止，不是强制中断线程。
-            for future in pending:
-                future.cancel()
 
     timed_out = 0
     for future in pending:
@@ -847,9 +783,8 @@ def build_outputs(
     available = [r for r in results if r.get("success")]
     countries: dict[str, dict[str, Any]] = {}
     for node in available:
-        exit_info = node.get('exit') or {}
-        code = (exit_info.get('country_code') or node.get("country_code") or "").upper() or "??"
-        name = COUNTRY_ZH.get(code) or exit_info.get('country') or node.get("country") or code
+        code = (node.get("country_code") or "").upper() or "??"
+        name = node.get("country") or COUNTRY_ZH.get(code) or code
         group = countries.setdefault(
             code, {"code": code, "name": name, "count": 0, "residential": 0, "datacenter": 0, "unknown": 0, "nodes": []}
         )
@@ -902,9 +837,8 @@ def build_nodes_text(data: dict[str, Any], edge_hosts: list[str], cfg: Config) -
     )
     for code, group in ordered:
         name = COUNTRY_ZH.get(code) or group.get("name") or code
-        eligible = [n for n in group['nodes'] if not cfg.residential_only or n.get('residential_candidate') is True]
         nodes = sorted(
-            eligible,
+            group["nodes"],
             key=lambda n: (n.get("residential") != "residential", n.get("latency_ms") is None, n.get("latency_ms") or 0),
         )
         residential = [n for n in nodes if n.get("residential") == "residential"]
@@ -918,7 +852,7 @@ def build_nodes_text(data: dict[str, Any], edge_hosts: list[str], cfg: Config) -
             seen_links.add(link)
             kind_key = node.get("residential") if node.get("residential") in counters else "unknown"
             counters[kind_key] += 1
-            kind = {"residential": "运营商候选", "datacenter": "机房", "unknown": "未知"}[kind_key]
+            kind = {"residential": "住宅", "datacenter": "机房", "unknown": "未知"}[kind_key]
             entry = edge_hosts[index % len(edge_hosts)]
             index += 1
             lines.append(f"{entry}#{sanitize_remark(f'{name}-{kind}-{counters[kind_key]:02d}')}${link}")
@@ -937,9 +871,6 @@ def atomic_write_text(path: str, text: str) -> None:
 def write_outputs(
     data: dict[str, Any], cfg: Config, edge_hosts: list[str]
 ) -> tuple[str, str, str, str]:
-    nodes_text = build_nodes_text(data, edge_hosts, cfg)
-    if not nodes_text.strip():
-        raise ConfigError('没有通过多轮检测且风险信息完整的运营商候选，本次不发布，保留上一份产物')
     os.makedirs(cfg.public_dir, exist_ok=True)
     data_path = os.path.join(cfg.public_dir, "data.json")
     html_path = os.path.join(cfg.public_dir, "index.html")
@@ -950,8 +881,6 @@ def write_outputs(
     if os.path.exists(cfg.template_html):
         with open(cfg.template_html, "r", encoding="utf-8") as handle:
             html = handle.read()
-        # 保留仓库中的原网页模板；仅调整生成页面的可见中文标签。
-        html = html.replace('住宅', '运营商候选')
     else:
         html = (
             "<!doctype html><html><head><meta charset='utf-8'><title>VPN Gate SSTP</title></head>"
@@ -961,6 +890,7 @@ def write_outputs(
             ".catch(e=>out.textContent='加载失败: '+e)</script></html>"
         )
     atomic_write_text(html_path, html)
+    nodes_text = build_nodes_text(data, edge_hosts, cfg)
     atomic_write_text(nodes_path, nodes_text)
     return data_path, html_path, nodes_path, nodes_text
 
