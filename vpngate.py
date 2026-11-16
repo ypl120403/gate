@@ -51,14 +51,18 @@ DEFAULT_VPNGATE_API = "http://www.vpngate.net/api/iphone/"
 DEFAULT_VPNGATE_MIRROR = (
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json"
 )
-DEFAULT_OPTIMAL_API = ""
+DEFAULT_OPTIMAL_API = "https://cf.090227.xyz/cmcc?ips=8"
 
 # 占位符检测：命中任意一个就认为用户还没配置
 PLACEHOLDER_MARKERS = ("你的", "YOUR_", "YOUR-", "example.com", "yourdomain")
 
 # 静态优选域名池（可用 EDGE_HOSTS 整体覆盖）
 DEFAULT_EDGE_HOSTS = [
-    "saas.sin.fan:443",
+    
+   "cookiebot.com:443",
+    "shopify.com:443",
+    "www.speedtest.net:443"
+  "saas.sin.fan:443",
     "www.mfyx.cn:443",
     "cf.nyanya.moe:443",
     "cf.877774.xyz:443",
